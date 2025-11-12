@@ -66,6 +66,7 @@ class SQLiteCalendar:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            # 构建更新语句
             set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
             values = list(updates.values()) + [event_id]
             
@@ -75,9 +76,18 @@ class SQLiteCalendar:
             
             conn.commit()
             conn.close()
-            return cursor.rowcount > 0
+            
+            rows_affected = cursor.rowcount
+            print(f"[DEBUG] 修改事件影响行数: {rows_affected}")
+            
+            if rows_affected > 0:
+                print(f"[DEBUG] 事件 {event_id} 已成功修改")
+                return True
+            else:
+                print(f"[DEBUG] 未找到事件 {event_id}")
+                return False
         except Exception as e:
-            print(f"修改事件失败: {e}")
+            print(f"[ERROR] 修改事件失败: {e}")
             return False
     
     async def delete_event(self, event_id: str) -> bool:
@@ -89,9 +99,13 @@ class SQLiteCalendar:
             cursor.execute('DELETE FROM events WHERE id = ?', (event_id,))
             conn.commit()
             conn.close()
-            return cursor.rowcount > 0
+            
+            rows_affected = cursor.rowcount
+            print(f"[DEBUG] 删除事件影响行数: {rows_affected}")
+            
+            return rows_affected > 0
         except Exception as e:
-            print(f"删除事件失败: {e}")
+            print(f"[ERROR] 删除事件失败: {e}")
             return False
     
     async def list_events(self, start_date: datetime, end_date: datetime) -> List[CalendarEvent]:

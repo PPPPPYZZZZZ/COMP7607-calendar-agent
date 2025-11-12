@@ -67,6 +67,81 @@ class CalendarAgent:
         else:
             return f"抱歉，我暂时无法处理这个请求。意图类型: {intent_type.value}"
     
+    async def handle_modify_event(self, parsed_intent: ParsedIntent) -> str:
+        """处理修改事件"""
+        print(f"[DEBUG] 处理修改事件，实体: {parsed_intent.entities}")
+        
+        original_text = parsed_intent.original_text
+        
+        # 从文本中提取新的时间
+        new_start_time, new_end_time = self._extract_datetime_from_text(original_text)
+        
+        if not new_start_time:
+            return "请提供新的时间信息，例如：'修改明天的会议到下午5点'"
+        
+        # 从文本中提取事件标题
+        event_title = self._extract_title_from_text(original_text)
+        print(f"[DEBUG] 提取的事件标题: {event_title}")
+        
+        # 查找需要修改的事件
+        # 默认查找今天和明天的事件
+        search_start = datetime.combine(datetime.now().date(), datetime.min.time())
+        search_end = datetime.combine((datetime.now() + timedelta(days=1)).date(), datetime.max.time())
+        
+        all_events = await self.calendar.list_events(search_start, search_end)
+        print(f"[DEBUG] 在时间范围内找到 {len(all_events)} 个事件")
+        
+        # 根据标题查找匹配的事件
+        matching_events = []
+        for event in all_events:
+            print(f"[DEBUG] 检查事件: {event.title}")
+            if event_title.lower() in event.title.lower() or event_title in event.description:
+                matching_events.append(event)
+                print(f"[DEBUG] 找到匹配事件: {event.title}")
+        
+        if not matching_events:
+            # 如果没有找到匹配标题的事件，尝试更宽松的匹配
+            for event in all_events:
+                if '讨论会' in event.title or '讨论会' in event.description:
+                    matching_events.append(event)
+                    print(f"[DEBUG] 找到宽松匹配事件: {event.title}")
+        
+        if not matching_events:
+            # 如果仍然没有找到，询问用户具体是哪个事件
+            return f"没有找到标题包含'{event_title}'的事件。当前时间范围内有以下事件：\n{self._format_event_list(all_events)}"
+        
+        # 如果找到多个匹配事件，询问用户要修改哪个
+        if len(matching_events) > 1:
+            event_list = "找到多个匹配事件：\n"
+            for i, event in enumerate(matching_events, 1):
+                event_list += f"{i}. {event.title} - {event.start_time.strftime('%m-%d %H:%M')}\n"
+            event_list += "请指定要修改的事件编号。"
+            return event_list
+        
+        # 找到匹配的事件，准备修改
+        target_event = matching_events[0]
+        
+        # 存储到上下文，等待用户确认
+        self.conversation_context['event_to_modify'] = target_event
+        self.conversation_context['new_start_time'] = new_start_time
+        self.conversation_context['new_end_time'] = new_end_time or (new_start_time + timedelta(hours=1))
+        
+        confirm_msg = f"确认修改事件吗？\n"
+        confirm_msg += f"原事件: {target_event.title} - {target_event.start_time.strftime('%m-%d %H:%M')}\n"
+        confirm_msg += f"新时间: {new_start_time.strftime('%m-%d %H:%M')}\n"
+        
+        return confirm_msg + "请输入'确认'修改或'取消'。"
+    
+    def _format_event_list(self, events):
+        """格式化事件列表用于显示"""
+        if not events:
+            return "当前时间范围内没有事件。"
+        
+        result = ""
+        for i, event in enumerate(events, 1):
+            result += f"{i}. {event.title} - {event.start_time.strftime('%m-%d %H:%M')}\n"
+        return result
+    
     async def handle_delete_event(self, parsed_intent: ParsedIntent) -> str:
         """处理删除事件"""
         print(f"[DEBUG] 处理删除事件，实体: {parsed_intent.entities}")
@@ -124,8 +199,51 @@ class CalendarAgent:
         """处理确认操作"""
         print(f"[DEBUG] 处理确认操作")
         
+        # 检查是否有待修改的事件
+        if 'event_to_modify' in self.conversation_context:
+            target_event = self.conversation_context['event_to_modify']
+            new_start_time = self.conversation_context['new_start_time']
+            new_end_time = self.conversation_context['new_end_time']
+            
+            print(f"[DEBUG] 修改事件: {target_event.title} 从 {target_event.start_time} 到 {new_start_time}")
+            
+            # 创建更新内容
+            updates = {
+                'start_time': new_start_time.isoformat(),
+                'end_time': new_end_time.isoformat()
+            }
+            
+            # 执行修改
+            success = await self.calendar.modify_event(target_event.id, updates)
+            
+            if success:
+                # 清除上下文
+                self.conversation_context.pop('event_to_modify', None)
+                self.conversation_context.pop('new_start_time', None)
+                self.conversation_context.pop('new_end_time', None)
+                
+                # 如果Google Calendar同步启用，也同步更新
+                if self.google_sync_enabled and self.google_calendar:
+                    # 重新创建事件对象用于同步
+                    updated_event = CalendarEvent(
+                        id=target_event.id,
+                        title=target_event.title,
+                        start_time=new_start_time,
+                        end_time=new_end_time,
+                        description=target_event.description,
+                        location=target_event.location,
+                        attendees=target_event.attendees
+                    )
+                    sync_success = self.google_calendar.sync_event_to_google(updated_event)
+                    if sync_success:
+                        print(f"✓ 事件已同步到Google Calendar")
+                
+                return f"事件 '{target_event.title}' 已成功修改到 {new_start_time.strftime('%Y-%m-%d %H:%M')}！"
+            else:
+                return "修改事件失败，请重试。"
+        
         # 检查是否有待删除的事件
-        if 'events_to_delete' in self.conversation_context:
+        elif 'events_to_delete' in self.conversation_context:
             event_ids = self.conversation_context['events_to_delete']
             delete_range = self.conversation_context['delete_range']
             
@@ -294,13 +412,41 @@ class CalendarAgent:
     
     def _extract_title_from_text(self, text: str) -> str:
         """从文本中提取标题"""
-        keywords = ['参加', '会议', '讨论会', '约会', '活动', '讲座', '培训']
+        text_lower = text.lower()
+        
+        # 如果是修改操作，提取要修改的事件标题
+        if any(keyword in text_lower for keyword in ['修改', '更改', '调整', '更新', '改变']):
+            # 查找"修改 [事件名] 到 [时间]" 模式
+            modify_pattern = r'修改\s*([^到的时间]+?)[\s到]'
+            match = re.search(modify_pattern, text)
+            if match:
+                title = match.group(1).strip()
+                # 移除可能的"的"字
+                if title.endswith('的'):
+                    title = title[:-1]
+                return title.strip()
+        
+        # 其他情况的标题提取
+        keywords = ['参加', '会议', '讨论会', '研讨会', '约会', '活动', '讲座', '培训', '开会']
         for keyword in keywords:
             if keyword in text:
-                start_idx = text.find(keyword) + len(keyword)
-                title = text[start_idx:].strip()
-                if title:
-                    return title.strip('在，。！？')
+                start_idx = text.find(keyword)
+                # 查找关键词前的词作为标题
+                before_keyword = text[:start_idx].strip()
+                if before_keyword and len(before_keyword) > 0:
+                    # 移除"的"字
+                    if before_keyword.endswith('的'):
+                        before_keyword = before_keyword[:-1]
+                    return before_keyword.strip()
+                else:
+                    # 如果关键词前没有内容，使用关键词后的部分
+                    after_idx = start_idx + len(keyword)
+                    after_text = text[after_idx:].strip()
+                    if after_text:
+                        # 取第一个词或短语
+                        parts = re.split(r'[，。！？\s]', after_text)
+                        return parts[0].strip()
+        
         return '未命名事件'
     
     def _extract_location_from_text(self, text: str) -> str:
@@ -404,11 +550,9 @@ class CalendarAgent:
         """处理取消操作"""
         print(f"[DEBUG] 处理取消操作")
         
-        if 'pending_event' in self.conversation_context or 'pending_action' in self.conversation_context:
-            self.conversation_context.clear()
-            return "操作已取消。"
-        
-        return "没有待取消的操作。"
+        # 清除所有上下文
+        self.conversation_context.clear()
+        return "操作已取消。"
     
     def handle_help(self, parsed_intent: ParsedIntent) -> str:
         """处理帮助请求"""
@@ -418,11 +562,7 @@ class CalendarAgent:
 - 查询日程：如"今天有什么安排"、"明天的日程"、"本周日程"
 - 列出日程：如"显示本周日程"、"列出明天的日程"
 - 删除事件：如"删除明天的日程"、"删除今天的会议"
-- 修改事件：如"修改明天的会议时间"
+- 修改事件：如"修改明天的会议时间"、"修改研讨会到下午5点"
 
 请输入您的需求，我会帮您处理。
         """
-    
-    async def handle_modify_event(self, parsed_intent: ParsedIntent) -> str:
-        """处理修改事件"""
-        return "正在处理事件修改..."

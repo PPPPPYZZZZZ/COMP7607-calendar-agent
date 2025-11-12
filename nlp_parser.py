@@ -64,7 +64,7 @@ class LLMParser:
             intent_type = IntentType.CANCEL_ACTION
             confidence = 0.9
             entities = {'action': 'cancel', 'raw_text': text}
-        elif any(keyword in text_lower for keyword in ['添加', '新建', '安排', '创建', '参加', '会议', '讨论会', '约会', '活动']):
+        elif any(keyword in text_lower for keyword in ['添加', '新建', '安排', '创建', '参加']):
             intent_type = IntentType.ADD_EVENT
             confidence = 0.8
             entities = {
