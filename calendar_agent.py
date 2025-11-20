@@ -73,15 +73,27 @@ class CalendarAgent:
                     )
                     return await self.handle_cancel_action(cancel_intent)
 
+
             # 🏋️ 修复：首先检查是否在训练计划对话中
             if self._is_in_workout_plan_conversation():
                 print(f"[DEBUG] 在训练计划对话中，直接继续对话")
                 return await self._continue_workout_plan_conversation_directly(user_input)
 
             parsed_intent = self.nlp_parser.parse(user_input)
-
+            # 如果用户只输入数字且存在可选事件列表，将其视为确认/选择操作（用于选择要删除/修改的事件）
+            if user_input.strip().isdigit() and 'available_events' in self.conversation_context:
+                parsed_intent = ParsedIntent(
+                    intent_type=IntentType.CONFIRM_ACTION,
+                    entities={'selection_index': int(user_input.strip())},
+                    confidence=1.0,
+                    original_text=user_input
+                )
+            else:
+                parsed_intent = self.nlp_parser.parse(user_input)
+ 
             print(f"[DEBUG] 意图类型: {parsed_intent.intent_type.value}")
             print(f"[DEBUG] 实体信息: {parsed_intent.entities}")
+
 
             if parsed_intent.confidence < 0.3:
                 return "抱歉，我没有理解您的意思。您可以告诉我需要添加、修改或查询日程。"
@@ -1326,7 +1338,7 @@ class CalendarAgent:
     def _extract_datetime_from_text(self, text: str):
         """从文本中提取日期时间 - 添加调试信息"""
         import re
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, time, date
 
         text_lower = text.lower()
         print(f"[DEBUG] 从文本提取时间: {text}")
@@ -1346,42 +1358,97 @@ class CalendarAgent:
 
         def parse_hour_from_text(time_str: str):
             """从时间字符串中解析小时数"""
-            # 🛠️ 修复：匹配中文数字和阿拉伯数字
-            # 匹配模式：上午/下午/晚上 + 中文/阿拉伯数字 + 点/时
-            time_match = re.search(r'(上午|下午|晚上)?([一二三四五六七八九十\d]{1,3})[点时]半?', time_str)
+            time_match = re.search(r'(上午|下午|晚上)?\s*([一二三四五六七八九十\d]{1,3})\s*[点时]半?', time_str)
             if time_match:
                 period, hour_str = time_match.groups()
-
-                # 🛠️ 修复：处理中文数字
                 if hour_str in chinese_number_map:
                     hour = chinese_number_map[hour_str]
                 else:
-                    # 如果是阿拉伯数字，直接转换
                     try:
                         hour = int(hour_str)
                     except:
                         return None, None
 
                 minute = 0
-                # 🛠️ 修复：检查是否有"半"表示30分钟
                 if '半' in time_str:
                     minute = 30
 
                 print(f"[DEBUG] 时间解析结果: 时段={period}, 小时={hour}, 分钟={minute}")
 
-                # 处理12小时制转换
                 if period == '下午' and hour < 12:
                     hour += 12
                 elif period == '晚上' and hour < 12:
                     hour += 12
                 elif period == '上午' and hour == 12:
                     hour = 0
-                # 🛠️ 修复：如果没有指定时段，但小时数较小，默认为下午
                 elif not period and hour < 8:
                     hour += 12
 
                 return hour, minute
             return None, None
+
+        # 新增：识别明确的"X月Y日"或"Y号/日"
+        md_match = re.search(r'(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]', text_lower)
+        day_match = re.search(r'(?<!\d)(\d{1,2})\s*[日号](?!\d)', text_lower)
+
+        if md_match:
+            month = int(md_match.group(1))
+            day = int(md_match.group(2))
+            year = now.year
+            # 若指定月份已过，推到下一年
+            if month < now.month or (month == now.month and day < now.day):
+                year += 1
+            try:
+                base_date = date(year, month, day)
+            except:
+                base_date = (now + timedelta(days=1)).date()
+            # 解析时段或小时
+            hour, minute = parse_hour_from_text(text_lower)
+            if hour is not None:
+                start_time = datetime.combine(base_date, time(hour=hour, minute=minute))
+                return start_time, start_time + timedelta(hours=1)
+            # 若没有给出具体小时，但给出了时段关键词，使用默认小时
+            if '下午' in text_lower:
+                start_time = datetime.combine(base_date, time(hour=15, minute=0))
+                return start_time, start_time + timedelta(hours=1)
+            if '上午' in text_lower:
+                start_time = datetime.combine(base_date, time(hour=9, minute=0))
+                return start_time, start_time + timedelta(hours=1)
+            if '晚上' in text_lower:
+                start_time = datetime.combine(base_date, time(hour=19, minute=0))
+                return start_time, start_time + timedelta(hours=1)
+            # 无时段和小时则默认上午9点
+            start_time = datetime.combine(base_date, time(hour=9, minute=0))
+            return start_time, start_time + timedelta(hours=1)
+
+        if day_match:
+            day = int(day_match.group(1))
+            month = now.month
+            year = now.year
+            # 若日已过，假定是下个月（考虑年末）
+            if day < now.day:
+                month += 1
+                if month > 12:
+                    month = 1
+                    year += 1
+            try:
+                base_date = date(year, month, day)
+            except:
+                base_date = (now + timedelta(days=1)).date()
+
+            hour, minute = parse_hour_from_text(text_lower)
+            if hour is not None:
+                start_time = datetime.combine(base_date, time(hour=hour, minute=minute))
+                return start_time, start_time + timedelta(hours=1)
+            if '下午' in text_lower:
+                start_time = datetime.combine(base_date, time(hour=15, minute=0))
+                return start_time, start_time + timedelta(hours=1)
+            if '上午' in text_lower:
+                start_time = datetime.combine(base_date, time(hour=9, minute=0))
+                return start_time, start_time + timedelta(hours=1)
+            if '晚上' in text_lower:
+                start_time = datetime.combine(base_date, time(hour=19, minute=0))
+                return start_time, start_time + timedelta(hours=1)
 
         # 🛠️ 修复：处理"明天"的情况
         if '明天' in text_lower:
@@ -1390,24 +1457,24 @@ class CalendarAgent:
 
             hour, minute = parse_hour_from_text(text_lower)
             if hour is not None:
-                start_time = datetime.combine(base_date, now.time().replace(hour=hour, minute=minute, second=0))
+                start_time = datetime.combine(base_date, time(hour=hour, minute=minute))
                 print(f"[DEBUG] 生成开始时间: {start_time}")
                 return start_time, start_time + timedelta(hours=1)
 
         # 🛠️ 修复：处理"今天"的情况
         elif '今天' in text_lower:
-            base_date = datetime.now().date()
+            base_date = now.date()
             hour, minute = parse_hour_from_text(text_lower)
             if hour is not None:
-                start_time = datetime.combine(base_date, datetime.min.time().replace(hour=hour, minute=minute))
+                start_time = datetime.combine(base_date, time(hour=hour, minute=minute))
                 return start_time, start_time + timedelta(hours=1)
 
         # 🛠️ 修复：处理没有日期的情况（默认今天）
         else:
             hour, minute = parse_hour_from_text(text_lower)
             if hour is not None:
-                base_date = datetime.now().date()
-                start_time = datetime.combine(base_date, datetime.min.time().replace(hour=hour, minute=minute))
+                base_date = now.date()
+                start_time = datetime.combine(base_date, time(hour=hour, minute=minute))
                 return start_time, start_time + timedelta(hours=1)
 
         return None, None
